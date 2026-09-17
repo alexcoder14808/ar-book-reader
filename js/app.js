@@ -152,7 +152,55 @@ $('save').onclick = async () => {
   }
 };
 $('local').onchange=e=>e.target.files[0]&&startLocal(e.target.files[0]);$('readerFile').onchange=e=>e.target.files[0]&&startLocal(e.target.files[0]);
-async function openReader(b){$('readerTitle').textContent=b.title;$('readerFile').value='';show('reader');$('readerFile').click()}
+async function openReader(b) {
+  $('readerTitle').textContent = b.title;
+  show('reader');
+  $('status').textContent = 'Loading book…';
+
+  try {
+    if (!b.file_path) {
+      throw new Error(
+        'This book does not have an ebook file attached. Edit the book and upload the EPUB or PDF.'
+      );
+    }
+
+    const result = await db.storage
+      .from('book-files')
+      .createSignedUrl(b.file_path, 300);
+
+    if (result.error) {
+      throw result.error;
+    }
+
+    const url = result.data?.signedUrl;
+
+    if (!url) {
+      throw new Error('Could not access the book file.');
+    }
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error('Could not download the book file.');
+    }
+
+    const blob = await response.blob();
+
+    const file = new File(
+      [blob],
+      b.file_name || 'book.' + (b.file_type || 'epub'),
+      {
+        type: blob.type
+      }
+    );
+
+    await startLocal(file);
+
+  } catch (e) {
+    console.error(e);
+    $('status').textContent = e.message || 'Could not open book.';
+  }
+}
 async function startLocal(file){show('reader');$('status').textContent='Parsing locally…';try{chunks=file.name.toLowerCase().endsWith('.pdf')?await parsePdf(file):await parseEpub(file);spread=0;buildAR();$('status').textContent='Point camera at the Hiro marker. Swipe to turn pages.';update()}catch(e){$('status').textContent=e.message}}
 function split(t,n=350){t=t.replace(/\r/g,'').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();let a=[];while(t){let i=t.length<=n?t.length:t.lastIndexOf(' ',n);if(i<Math.floor(n*.6))i=Math.min(n,t.length);a.push(t.slice(0,i).trim());t=t.slice(i).trim()}return a.filter(Boolean)}
 async function parseEpub(file) {
