@@ -12,7 +12,151 @@ $('local').onchange=e=>e.target.files[0]&&startLocal(e.target.files[0]);$('reade
 async function openReader(b){$('readerTitle').textContent=b.title;$('readerFile').value='';show('reader');$('readerFile').click()}
 async function startLocal(file){show('reader');$('status').textContent='Parsing locally…';try{chunks=file.name.toLowerCase().endsWith('.pdf')?await parsePdf(file):await parseEpub(file);spread=0;buildAR();$('status').textContent='Point camera at the Hiro marker. Swipe to turn pages.';update()}catch(e){$('status').textContent=e.message}}
 function split(t,n=350){t=t.replace(/\r/g,'').replace(/[ \t]+/g,' ').replace(/\n{3,}/g,'\n\n').trim();let a=[];while(t){let i=t.length<=n?t.length:t.lastIndexOf(' ',n);if(i<Math.floor(n*.6))i=Math.min(n,t.length);a.push(t.slice(0,i).trim());t=t.slice(i).trim()}return a.filter(Boolean)}
-async function parseEpub(f){let z=await JSZip.loadAsync(await f.arrayBuffer()),c=await z.file('META-INF/container.xml').async('text'),d=new DOMParser().parseFromString(c,'application/xml'),rf=d.querySelector('rootfile');if(!rf)throw Error('Invalid EPUB container');let op=rf.getAttribute('full-path'),od=new DOMParser().parseFromString(await z.file(op).async('text'),'application/xml'),m=new Map();od.querySelectorAll('manifest>item').forEach(i=>m.set(i.getAttribute('id'),i));let base=op.split('/').slice(0,-1).join('/'),out=[];for(const r of od.querySelectorAll('spine>itemref')){let i=m.get(r.getAttribute('idref'));if(!i||!/xhtml|html/i.test(i.getAttribute('media-type')||''))continue;let p=base?base+'/'+i.getAttribute('href'):i.getAttribute('href'),e=z.file(p);if(!e)continue;let x=new DOMParser().parseFromString(await e.async('text'),'text/html');x.querySelectorAll('script,style,nav').forEach(n=>n.remove());out.push(x.body?.innerText||'')}let a=split(out.join('\n\n'));if(!a.length)throw Error('No readable text found');return a}
+async function parseEpub(file) {
+  try {
+    if (!file || file.size === 0) {
+      throw new Error('The EPUB file is empty.');
+    }
+
+    const buffer = await file.arrayBuffer();
+
+    // A valid ZIP/EPUB normally starts with PK (0x50 0x4B).
+    const bytes = new Uint8Array(buffer);
+    if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4B) {
+      throw new Error(
+        'This file is not being received as a valid EPUB/ZIP. Please download the EPUB file itself, not the Gutenberg webpage.'
+      );
+    }
+
+    const zip = await JSZip.loadAsync(buffer);
+
+    const containerFile = zip.file('META-INF/container.xml');
+    if (!containerFile) {
+      throw new Error('Invalid EPUB: META-INF/container.xml is missing.');
+    }
+
+    const containerText = await containerFile.async('text');
+    const containerDoc = new DOMParser().parseFromString(
+      containerText,
+      'application/xml'
+    );
+
+    if (containerDoc.querySelector('parsererror')) {
+      throw new Error('Invalid EPUB container.xml.');
+    }
+
+    const rootfile = containerDoc.querySelector('rootfile');
+    const opfPath = rootfile?.getAttribute('full-path');
+
+    if (!opfPath) {
+      throw new Error('Invalid EPUB: OPF file could not be found.');
+    }
+
+    const opfFile = zip.file(opfPath);
+    if (!opfFile) {
+      throw new Error(`Invalid EPUB: OPF file not found: ${opfPath}`);
+    }
+
+    const opfText = await opfFile.async('text');
+    const opfDoc = new DOMParser().parseFromString(
+      opfText,
+      'application/xml'
+    );
+
+    if (opfDoc.querySelector('parsererror')) {
+      throw new Error('Invalid EPUB package document.');
+    }
+
+    const manifest = new Map();
+
+    opfDoc.querySelectorAll('manifest > item').forEach(item => {
+      const id = item.getAttribute('id');
+      if (id) manifest.set(id, item);
+    });
+
+    const opfDirectory = opfPath.includes('/')
+      ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1)
+      : '';
+
+    const textParts = [];
+
+    for (const itemRef of opfDoc.querySelectorAll('spine > itemref')) {
+      const idref = itemRef.getAttribute('idref');
+      const item = manifest.get(idref);
+
+      if (!item) continue;
+
+      const mediaType = item.getAttribute('media-type') || '';
+
+      if (
+        !mediaType.includes('html') &&
+        !mediaType.includes('xhtml')
+      ) {
+        continue;
+      }
+
+      const href = item.getAttribute('href');
+      if (!href) continue;
+
+      // EPUB hrefs can contain URL encoding.
+      let decodedHref = href;
+      try {
+        decodedHref = decodeURIComponent(href);
+      } catch (_) {}
+
+      const path = opfDirectory + decodedHref;
+      const entry = zip.file(path);
+
+      if (!entry) {
+        // Try the un-decoded path as a fallback.
+        const fallback = zip.file(opfDirectory + href);
+        if (!fallback) continue;
+
+        const html = await fallback.async('text');
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+
+        doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
+
+        if (doc.body?.innerText) {
+          textParts.push(doc.body.innerText);
+        }
+
+        continue;
+      }
+
+      const html = await entry.async('text');
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+
+      doc.querySelectorAll('script, style, nav').forEach(el => el.remove());
+
+      if (doc.body?.innerText) {
+        textParts.push(doc.body.innerText);
+      }
+    }
+
+    const text = textParts.join('\n\n');
+    const result = split(text);
+
+    if (!result.length) {
+      throw new Error('The EPUB opened successfully, but no readable text was found.');
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error('EPUB parsing error:', error);
+
+    if (
+      error?.message?.toLowerCase().includes('end of central directory')
+    ) {
+      throw new Error(
+        'The EPUB ZIP container could not be read. Make sure you downloaded the EPUB3 file itself from Project Gutenberg.'
+      );
+    }
+
+    throw error;
+  }
+}
 async function parsePdf(f){const pdf=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs');const p=await pdf.getDocument({data:new Uint8Array(await f.arrayBuffer())}).promise,out=[];for(let i=1;i<=p.numPages;i++){let pg=await p.getPage(i),c=await pg.getTextContent();out.push(c.items.map(x=>x.str).join(' '))}return split(out.join('\n\n'))}
 function buildAR(){if(scene){scene.remove()}$('ar').innerHTML='';scene=document.createElement('a-scene');scene.setAttribute('embedded','');scene.setAttribute('vr-mode-ui','enabled:false');scene.setAttribute('renderer','colorManagement:true;precision:mediump');scene.setAttribute('arjs','sourceType: webcam; facingMode: environment; debugUIEnabled: false;');let marker=document.createElement('a-marker');marker.setAttribute('preset','hiro');let book=document.createElement('a-entity');let spine=document.createElement('a-box');spine.setAttribute('position','0 0.05 0');spine.setAttribute('width','.06');spine.setAttribute('height','.05');spine.setAttribute('depth','.78');spine.setAttribute('color','#252a32');book.append(spine);for(const x of [-.29,.29]){let p=document.createElement('a-box');p.setAttribute('position',`${x} .02 0`);p.setAttribute('width','.52');p.setAttribute('height','.012');p.setAttribute('depth','.78');p.setAttribute('color','#f7f4eb');book.append(p)};for(const x of [-.29,.29]){let t=document.createElement('a-text');t.setAttribute('id',x<0?'leftText':'rightText');t.setAttribute('position',`${x} .031 0`);t.setAttribute('rotation','-90 0 0');t.setAttribute('width','.43');t.setAttribute('height','.65');t.setAttribute('color','#111');t.setAttribute('align','left');t.setAttribute('baseline','top');t.setAttribute('wrap-count','38');book.append(t)}marker.append(book);scene.append(marker);let cam=document.createElement('a-entity');cam.setAttribute('camera','');cam.setAttribute('look-controls-enabled','false');scene.append(cam);$('ar').append(scene)}
 function update(){$('leftText')?.setAttribute('value',chunks[spread*2]||'');$('rightText')?.setAttribute('value',chunks[spread*2+1]||'');$('pages').textContent=`${spread*2+1}–${Math.min(chunks.length,spread*2+2)} / ${chunks.length}`}
