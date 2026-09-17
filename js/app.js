@@ -7,7 +7,150 @@ $('login').onclick=async()=>{msg('authMsg','Logging in…');const r=await db.aut
 $('signup').onclick=async()=>{msg('authMsg','Creating account…');const r=await db.auth.signUp({email:$('email').value.trim(),password:$('password').value});if(r.error)msg('authMsg',r.error.message);else msg('authMsg',r.data.session?'Account created.':'Check your email to confirm your account.')};
 $('logout').onclick=()=>db.auth.signOut();$('add').onclick=()=>edit();$('back').onclick=$('cancel').onclick=()=>show('shelf');
 function edit(b=null){editing=b;$('editHeading').textContent=b?'Edit book':'Add book';$('bookId').value=b?.id||'';$('title').value=b?.title||'';$('author').value=b?.author||'';$('description').value=b?.description||'';$('cover').value='';$('editMsg').textContent='';show('editor')}
-$('save').onclick=async()=>{try{msg('editMsg','Saving…');if(!user)throw Error('Not logged in');let path=editing?.cover_path||null,f=$('cover').files[0];if(f){const ext=(f.name.split('.').pop()||'jpg').toLowerCase().replace(/[^a-z0-9]/g,'');path=`${user.id}/${crypto.randomUUID()}.${ext||'jpg'}`;let u=await db.storage.from('book-covers').upload(path,f,{upsert:false,contentType:f.type});if(u.error)throw u.error}let payload={title:$('title').value.trim(),author:$('author').value.trim()||null,description:$('description').value.trim()||null,cover_path:path};let r=editing?await db.from('books').update(payload).eq('id',editing.id).select().single():await db.from('books').insert({...payload,user_id:user.id}).select().single();if(r.error)throw r.error;show('shelf');await refresh()}catch(e){msg('editMsg',e.message)}};
+$('save').onclick = async () => {
+  try {
+    msg('editMsg', 'Saving…');
+
+    if (!user) {
+      throw new Error('Not logged in');
+    }
+
+    const title = $('title').value.trim();
+
+    if (!title) {
+      throw new Error('Please enter a book title.');
+    }
+
+    const bookFile = $('bookFile').files[0];
+
+    if (!editing && !bookFile) {
+      throw new Error('Please choose an EPUB or PDF file.');
+    }
+
+    if (bookFile) {
+      const name = bookFile.name.toLowerCase();
+
+      if (!name.endsWith('.epub') && !name.endsWith('.pdf')) {
+        throw new Error('Only EPUB and PDF files are allowed.');
+      }
+    }
+
+    // Upload cover if one was selected.
+    let coverPath = editing?.cover_path || null;
+
+    const coverFile = $('cover').files[0];
+
+    if (coverFile) {
+      const ext = (coverFile.name.split('.').pop() || 'jpg')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '');
+
+      coverPath =
+        `${user.id}/${crypto.randomUUID()}.${ext || 'jpg'}`;
+
+      const upload = await db.storage
+        .from('book-covers')
+        .upload(coverPath, coverFile, {
+          upsert: false,
+          contentType: coverFile.type
+        });
+
+      if (upload.error) {
+        throw upload.error;
+      }
+    }
+
+    let bookId = editing?.id;
+
+    // Create the database record first for a new book.
+    if (!editing) {
+      const result = await db
+        .from('books')
+        .insert({
+          user_id: user.id,
+          title,
+          author: $('author').value.trim() || null,
+          description: $('description').value.trim() || null,
+          cover_path: coverPath,
+          file_name: bookFile.name,
+          file_type: bookFile.name.toLowerCase().endsWith('.pdf')
+            ? 'pdf'
+            : 'epub'
+        })
+        .select()
+        .single();
+
+      if (result.error) {
+        throw result.error;
+      }
+
+      bookId = result.data.id;
+    } else {
+      // Update existing book metadata.
+      const result = await db
+        .from('books')
+        .update({
+          title,
+          author: $('author').value.trim() || null,
+          description: $('description').value.trim() || null,
+          cover_path: coverPath
+        })
+        .eq('id', editing.id)
+        .select()
+        .single();
+
+      if (result.error) {
+        throw result.error;
+      }
+    }
+
+    // Upload the ebook itself.
+    if (bookFile) {
+      const extension = bookFile.name
+        .split('.')
+        .pop()
+        .toLowerCase();
+
+      const filePath =
+        `${user.id}/${bookId}/${crypto.randomUUID()}.${extension}`;
+
+      const upload = await db.storage
+        .from('book-files')
+        .upload(filePath, bookFile, {
+          upsert: false,
+          contentType:
+            extension === 'pdf'
+              ? 'application/pdf'
+              : 'application/epub+zip'
+        });
+
+      if (upload.error) {
+        throw upload.error;
+      }
+
+      const result = await db
+        .from('books')
+        .update({
+          file_path: filePath,
+          file_name: bookFile.name,
+          file_type: extension
+        })
+        .eq('id', bookId);
+
+      if (result.error) {
+        throw result.error;
+      }
+    }
+
+    msg('editMsg', 'Book saved.');
+    show('shelf');
+    await refresh();
+
+  } catch (e) {
+    console.error(e);
+    msg('editMsg', e.message || 'Could not save book.');
+  }
+};
 $('local').onchange=e=>e.target.files[0]&&startLocal(e.target.files[0]);$('readerFile').onchange=e=>e.target.files[0]&&startLocal(e.target.files[0]);
 async function openReader(b){$('readerTitle').textContent=b.title;$('readerFile').value='';show('reader');$('readerFile').click()}
 async function startLocal(file){show('reader');$('status').textContent='Parsing locally…';try{chunks=file.name.toLowerCase().endsWith('.pdf')?await parsePdf(file):await parseEpub(file);spread=0;buildAR();$('status').textContent='Point camera at the Hiro marker. Swipe to turn pages.';update()}catch(e){$('status').textContent=e.message}}
